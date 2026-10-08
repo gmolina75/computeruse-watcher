@@ -1,15 +1,26 @@
 from __future__ import annotations
+
+import json
+import logging
+import time
+from datetime import datetime, timezone
 from pathlib import Path
+
 from cuw.core.config import AgentConfig
-from cuw.core.logging import setup_logging
 from cuw.core.db import DB
+from cuw.core.events import FocusEvent, IdleEvent, SystemEvent, utc_iso
 from cuw.network.mqtt_client import MQTTClient
 from cuw.platform_abstraction import get_watcher
-import logging
 
 log = logging.getLogger("cuw.daemon")
 
+OFFLINE_PAYLOAD = '{"status": "offline"}'
+ONLINE_PAYLOAD = {"status": "online"}
+
+
 class StateMachine:
+    """Event-first state machine: SQLite cache → MQTT sync, focus tracking, idle detection."""
+
     def __init__(self, cfg: AgentConfig) -> None:
         self.cfg = cfg
         cfg.data_dir.mkdir(parents=True, exist_ok=True)
@@ -25,6 +36,7 @@ class StateMachine:
         )
         self._prev_proc: tuple[str, str] | None = None
         self._prev_start: float | None = None
+        self._idle_emitted: bool = False
 
     def _status_topic(self) -> str:
         return f"{self.cfg.mqtt_topic_prefix}/{self.watcher.hostname}/status"
@@ -32,19 +44,21 @@ class StateMachine:
     def _events_topic(self) -> str:
         return f"{self.cfg.mqtt_topic_prefix}/{self.watcher.hostname}/events"
 
+    def _now_iso(self) -> str:
+        return datetime.now(timezone.utc).isoformat()
+
     def _publish_status_online(self) -> None:
         payload = {
             "status": "online",
             "os": self.watcher.os_name,
             "os_version": self.watcher.os_version,
-            "timestamp": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+            "timestamp": self._now_iso(),
         }
-        self.db.insert_event("system", {**payload, "hostname": self.watcher.hostname, "os": self.watcher.os_name, "os_version": self.watcher.os_version, "username": self.watcher.username})
+        self.db.insert_event("system", {**payload, "hostname": self.watcher.hostname, "username": self.watcher.username})
         self.mqtt.publish_json(self._status_topic(), payload, retain=True)
 
     def start(self) -> None:
-        lwt = json_placeholder = '{"status":"offline"}'
-        self.mqtt.connect(self._status_topic(), '{"status":"offline"}')
+        self.mqtt.connect(self._status_topic(), OFFLINE_PAYLOAD)
         self._publish_status_online()
         log.info("Daemon started on %s", self.watcher.hostname)
 
@@ -54,33 +68,42 @@ class StateMachine:
         log.info("Daemon stopped")
 
     def tick(self) -> None:
-        # Sync pending events
         self._sync_pending()
-        # Focus change detection
+        self._track_focus()
+        self._track_idle()
+
+    def _track_focus(self) -> None:
         active = self.watcher.active_window()
-        if active:
-            proc, title = active
-            if self._prev_proc != active:
-                # finalize previous
-                if self._prev_proc and self._prev_start is not None:
-                    duration = __import__("time").time() - self._prev_start
-                    self._emit_focus(self._prev_proc[0], self._prev_proc[1], start=self._prev_start, duration=duration)
-                self._prev_proc = active
-                self._prev_start = __import__("time").time()
-            else:
-                # keep running
-                pass
-        # Idle detection
+        if not active:
+            return
+        proc, title = active
+        if self._prev_proc != active:
+            if self._prev_proc and self._prev_start is not None:
+                duration = time.time() - self._prev_start
+                self._emit_focus(self._prev_proc[0], self._prev_proc[1], duration)
+            self._prev_proc = active
+            self._prev_start = time.time()
+            self._idle_emitted = False
+
+    def _track_idle(self) -> None:
         try:
             idle = self.watcher.idle_seconds()
-            if idle > self.cfg.idle_threshold_sec:
-                # emit idle (only when crossing threshold)
-                pass
         except Exception:
-            pass
+            return
+        if idle > self.cfg.idle_threshold_sec and not self._idle_emitted:
+            ev = IdleEvent(
+                hostname=self.watcher.hostname,
+                os=self.watcher.os_name,
+                os_version=self.watcher.os_version,
+                username=self.watcher.username,
+                idle_seconds=idle,
+            )
+            payload = ev.model_dump(mode="json")
+            self.db.insert_event("idle", payload)
+            self.mqtt.publish_json(self._events_topic(), payload)
+            self._idle_emitted = True
 
-    def _emit_focus(self, proc: str, title: str, start: float, duration: float) -> None:
-        from cuw.core.events import FocusEvent, utc_iso
+    def _emit_focus(self, proc: str, title: str, duration: float) -> None:
         ev = FocusEvent(
             hostname=self.watcher.hostname,
             os=self.watcher.os_name,
@@ -97,9 +120,10 @@ class StateMachine:
 
     def _sync_pending(self) -> None:
         rows = list(self.db.pending(limit=200))
-        sent_ids = []
+        sent_ids: list[int] = []
         for r in rows:
-            success = self.mqtt.publish_json(self._events_topic(), eval(r["payload"]))
+            payload = json.loads(r["payload"])
+            success = self.mqtt.publish_json(self._events_topic(), payload)
             if success:
                 sent_ids.append(r["id"])
         if sent_ids:
