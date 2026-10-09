@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="Computer Use Watcher" Version="0.1.0" Manufacturer="Giancarlo Molina" UpgradeCode="12345678-1234-1234-1234-1234567890AB">
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Computer Use Watcher is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Directory Id="ProgramFilesFolder">
+      <Directory Id="INSTALLFOLDER" Name="computeruse-watcher">
+        <Component Id="AppFiles" Guid="12345678-1234-1234-1234-1234567890AC">
+          <File Id="cuw_cli" Source="src\cuw\cli.py" />
+          <File Id="cuw_init" Source="src\cuw\__init__.py" />
+          <File Id="core_config" Source="src\cuw\core\config.py" />
+          <File Id="core_db" Source="src\cuw\core\db.py" />
+          <File Id="core_events" Source="src\cuw\core\events.py" />
+          <File Id="core_logging" Source="src\cuw\core\logging.py" />
+          <File Id="network_mqtt" Source="src\cuw\network\mqtt_client.py" />
+          <File Id="platform_base" Source="src\cuw\platform_abstraction\base.py" />
+          <File Id="platform_generic" Source="src\cuw\platform_abstraction\generic.py" />
+          <File Id="platform_windows" Source="src\cuw\platform_abstraction\windows.py" />
+          <File Id="platform_linux" Source="src\cuw\platform_abstraction\linux.py" />
+          <File Id="daemon_sm" Source="src\cuw\daemon\state_machine.py" />
+          <File Id="pyproject" Source="pyproject.toml" />
+          <File Id="config_example" Source="config.example.yaml" />
+          <File Id="readme" Source="README.md" />
+        </Component>
+      </Directory>
+    </Directory>
+
+    <Directory Id="ProgramMenuFolder">
+      <Directory Id="AppProgramMenuFolder" Name="computeruse-watcher" />
+    </Directory>
+
+    <Directory Id="DesktopFolder" />
+
+    <Component Id="StartMenuShortcut" Guid="12345678-1234-1234-1234-1234567890AD" Feature="MainApp">
+      <RegistryKey Root="HKMU" Key="Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders" Name="Programs" />
+      <Shortcut Id="cuw_start" Name="Computer Use Watcher" Target="[INSTALLFOLDER]\src\cuw\cli.py" />
+    </Component>
+
+    <Component Id="ServiceInstaller" Guid="12345678-1234-1234-1234-1234567890AE" Feature="MainApp">
+      <File Id="win_service" Source="src\cuw\service\win_service.py" />
+      <Service Id="cuw_service" Name="ComputerUseWatcher" DisplayName="Computer Use Watcher Agent" Type="ownProcess" Start="auto" />
+    </Component>
+
+    <Feature Id="MainApp" Title="Computer Use Watcher" Level="1">
+      <ComponentRef Id="AppFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="ServiceInstaller" />
+    </Feature>
+
+    <UI Id="InstallerUI">
+      <Style Id="Standard" />
+      <Dialog Id="Welcome" Width="450" Height="300" Title="Computer Use Watcher Installer">
+        <Text>X</Text>
+        <Button Name="Next" Width="100" Height="30" X="175" Y="250" />
+      </Dialog>
+    </UI>
+  </Product>
+</Wix>
